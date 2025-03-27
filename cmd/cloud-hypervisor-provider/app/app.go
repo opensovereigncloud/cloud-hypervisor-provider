@@ -16,6 +16,8 @@ import (
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/controllers"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/host"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/oci"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume/ceph"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/raw"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/server"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/strategy"
@@ -148,6 +150,20 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	pluginManager := volume.NewPluginManager()
+	if err := pluginManager.InitPlugins(hostPaths, []volume.Plugin{
+		ceph.NewPlugin(ceph.DefaultProvider(
+			log,
+			hostPaths,
+			//TODO flag
+			"/usr/bin/qemu-storage-daemon",
+			false,
+		)),
+	}); err != nil {
+		setupLog.Error(err, "failed to initialize plugins")
+		return err
+	}
+
 	machineStore, err := hostutils.NewStore[*api.Machine](hostutils.Options[*api.Machine]{
 		Dir:            hostPaths.MachineStoreDir(),
 		NewFunc:        func() *api.Machine { return &api.Machine{} },
@@ -186,6 +202,7 @@ func Run(ctx context.Context, opts Options) error {
 		machineEvents,
 		eventRecorder,
 		virtualMachineManager,
+		pluginManager,
 		controllers.MachineReconcilerOptions{
 			ImageCache: imgCache,
 			Raw:        rawInst,
