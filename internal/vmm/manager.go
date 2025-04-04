@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/api"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/cloud-hypervisor/client"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/host"
 	"github.com/ironcore-dev/ironcore/broker/common"
@@ -27,6 +29,7 @@ const (
 
 type ManagerOptions struct {
 	CloudHypervisorBin string
+	FirmwarePath       string
 	Logger             logr.Logger
 
 	DetachVms bool
@@ -39,6 +42,7 @@ func NewManager(paths host.Paths, opts ManagerOptions) *Manager {
 
 		paths:              paths,
 		cloudHypervisorBin: opts.CloudHypervisorBin,
+		firmwarePath:       opts.FirmwarePath,
 		log:                opts.Logger,
 		detachVms:          opts.DetachVms,
 	}
@@ -52,6 +56,7 @@ type Manager struct {
 
 	paths              host.Paths
 	cloudHypervisorBin string
+	firmwarePath       string
 
 	detachVms bool
 }
@@ -75,6 +80,8 @@ func (m *Manager) initVmm(log logr.Logger, apiSocket string) error {
 		m.cloudHypervisorBin,
 		"--api-socket",
 		apiSocket,
+		//TODO fix
+		"-v",
 	}
 
 	log.V(1).Info("Start cloud-hypervisor", "cmd", chCmd)
@@ -188,19 +195,23 @@ func (m *Manager) GetVM(ctx context.Context, machineId string) (*client.VmInfo, 
 	}
 
 	log.V(2).Info("Getting vm")
-	res, err := apiClient.GetVmInfoWithResponse(ctx)
+	resp, err := apiClient.GetVmInfoWithResponse(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get vm: %w", err)
 	}
 
-	if res.StatusCode() == 500 && string(res.Body) == "VM is not created" {
-		return nil, ErrVmNotCreated
+	if err := validateStatus(resp.StatusCode()); err != nil {
+		if string(resp.Body) == "VM is not created" {
+			return nil, ErrVmNotCreated
+		}
+		return nil, err
 	}
 
-	return res.JSON200, nil
+	return resp.JSON200, nil
 }
 
-func (m *Manager) CreateVM(ctx context.Context, machineId string) error {
+func (m *Manager) CreateVM(ctx context.Context, machine *api.Machine) error {
+	machineId := machine.ID
 	m.idMu.Lock(machineId)
 	defer m.idMu.Unlock(machineId)
 
@@ -211,43 +222,114 @@ func (m *Manager) CreateVM(ctx context.Context, machineId string) error {
 		return ErrNotFound
 	}
 
+	payload := client.PayloadConfig{
+		Cmdline:   nil,
+		Firmware:  ptr.To(m.firmwarePath),
+		HostData:  nil,
+		Igvm:      nil,
+		Initramfs: nil,
+		Kernel:    nil,
+	}
+
+	var disks []client.DiskConfig
+	if ptr.Deref(machine.Spec.Image, "") != "" {
+		disks = append(disks, client.DiskConfig{
+			Path: ptr.To(m.paths.MachineRootFSFile(machineId)),
+		})
+	}
+
+	for _, vol := range machine.Status.VolumeStatus {
+		disk := client.DiskConfig{
+			Id: ptr.To(vol.Handle),
+		}
+
+		switch vol.Type {
+		case api.VolumeSocketType:
+			disk.VhostUser = ptr.To(true)
+			disk.VhostSocket = ptr.To(vol.Path)
+			disk.Readonly = ptr.To(false)
+		case api.VolumeFileType:
+			disk.Path = ptr.To(vol.Path)
+		}
+
+		disks = append(disks, disk)
+	}
+
 	log.V(2).Info("Getting vm")
-	_, err := apiClient.CreateVMWithResponse(ctx, client.CreateVMJSONRequestBody{
-		Balloon:      nil,
-		Console:      nil,
-		Cpus:         nil,
-		DebugConsole: nil,
-		Devices:      nil,
-		Disks: &[]client.DiskConfig{
-			{
-				Id:   ptr.To("a"),
-				Path: "",
-			},
+	resp, err := apiClient.CreateVMWithResponse(ctx, client.CreateVMJSONRequestBody{
+		Cpus: &client.CpusConfig{
+			BootVcpus: int(math.Max(float64(machine.Spec.CpuMillis/1000), 1)),
+			MaxVcpus:  int(math.Max(float64(machine.Spec.CpuMillis/1000), 1)),
 		},
-		Fs:              nil,
-		Iommu:           nil,
-		LandlockEnable:  nil,
-		LandlockRules:   nil,
-		Memory:          nil,
-		Net:             nil,
-		Numa:            nil,
-		Payload:         client.PayloadConfig{},
-		PciSegments:     nil,
-		Platform:        nil,
-		Pmem:            nil,
-		Pvpanic:         nil,
-		RateLimitGroups: nil,
-		Rng:             nil,
-		Serial:          nil,
-		SgxEpc:          nil,
-		Tpm:             nil,
-		Vdpa:            nil,
-		Vsock:           nil,
-		Watchdog:        nil,
+		Devices: nil,
+		Disks:   &disks,
+		Memory: &client.MemoryConfig{
+			Size:   machine.Spec.MemoryBytes,
+			Shared: ptr.To(true),
+		},
+		Console: &client.ConsoleConfig{
+			Mode: "Off",
+		},
+		Serial: &client.ConsoleConfig{
+			Mode: "Tty",
+		},
+		Payload: payload,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get vm: %w", err)
 	}
+
+	if err := validateStatus(resp.StatusCode()); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (m *Manager) PowerOn(ctx context.Context, machineId string) error {
+	m.idMu.Lock(machineId)
+	defer m.idMu.Unlock(machineId)
+
+	log := m.log.WithValues("machineID", machineId)
+
+	apiClient, found := m.vms[machineId]
+	if !found {
+		return ErrNotFound
+	}
+
+	resp, err := apiClient.BootVMWithResponse(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to boot vm: %w", err)
+	}
+
+	if err := validateStatus(resp.StatusCode()); err != nil {
+		return err
+	}
+	log.V(1).Info("Powered on machine")
+
+	return nil
+}
+
+func (m *Manager) PowerOff(ctx context.Context, machineId string) error {
+	m.idMu.Lock(machineId)
+	defer m.idMu.Unlock(machineId)
+
+	log := m.log.WithValues("machineID", machineId)
+
+	apiClient, found := m.vms[machineId]
+	if !found {
+		return ErrNotFound
+	}
+
+	resp, err := apiClient.ShutdownVMWithResponse(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to shutdown vm: %w", err)
+	}
+
+	if err := validateStatus(resp.StatusCode()); err != nil {
+		return err
+	}
+	log.V(1).Info("Powered off machine")
 
 	return nil
 }

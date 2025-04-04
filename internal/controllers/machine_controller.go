@@ -12,8 +12,10 @@ import (
 
 	"github.com/go-logr/logr"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/api"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/cloud-hypervisor/client"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/host"
 	ociImage "github.com/ironcore-dev/cloud-hypervisor-provider/internal/oci"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/osutils"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/raw"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/vmm"
@@ -193,7 +195,11 @@ func (r *MachineReconciler) reconcileMachine(ctx context.Context, id string) err
 	}
 	log.V(1).Info("Successfully made machine directories")
 
-	if err := r.vmm.InitVMM(ctx, id); err != nil {
+	if requeue, err := r.reconcileImage(ctx, log, machine); err != nil || requeue {
+		return err
+	}
+
+	if err := r.vmm.InitVMM(ctx, machine.ID); err != nil {
 		return fmt.Errorf("failed to init vmm: %w", err)
 	}
 
@@ -201,32 +207,87 @@ func (r *MachineReconciler) reconcileMachine(ctx context.Context, id string) err
 		return fmt.Errorf("failed to ping vmm: %w", err)
 	}
 
-	//vm, err := r.vmm.GetVM(ctx, machine.ID)
-	//if err != nil {
-	//	return fmt.Errorf("failed to ping vmm: %w", err)
-	//}
-	//
-	//_ = vm
-
-	if len(machine.Spec.Volumes) > 0 {
-		vol := machine.Spec.Volumes[0]
+	var updatedVolumeStatus []api.VolumeStatus
+	for _, vol := range machine.Spec.Volumes {
 		plugin, err := r.VolumePluginManager.FindPluginBySpec(vol)
 		if err != nil {
 			return fmt.Errorf("failed to find plugin: %w", err)
 		}
 
-		appliedVolume, err := plugin.Apply(ctx, vol, machine)
+		appliedVolume, err := plugin.Apply(ctx, vol, machine.ID)
 		if err != nil {
 			return fmt.Errorf("failed to apply volume: %w", err)
 		}
 
-		_ = plugin.Delete(ctx, appliedVolume.Handle, machine.ID)
+		//TODO handle later detach volume
+		updatedVolumeStatus = append(updatedVolumeStatus, *appliedVolume)
+	}
+	machine.Status.VolumeStatus = updatedVolumeStatus
 
-		_ = appliedVolume
+	machine, err = r.machines.Update(ctx, machine)
+	if err != nil {
+		return fmt.Errorf("failed to update machine status: %w", err)
 	}
 
-	// img, err := r.imageCache.Get(ctx, *machine.Spec.Image)
-	// _ = img
+	vm, err := r.vmm.GetVM(ctx, machine.ID)
+	if err != nil {
+		if errors.Is(err, vmm.ErrVmNotCreated) {
+			log.V(1).Info("VM not created", "machine", machine.ID)
+
+			if err := r.vmm.CreateVM(ctx, machine); err != nil {
+				log.V(1).Info("Failed to create VM", "machine", machine.ID)
+				return fmt.Errorf("failed to create VM: %w", err)
+			}
+
+			log.V(1).Info("Successfully created VM, requeue", "machine", machine.ID)
+			r.queue.Add(machine.ID)
+			return nil
+		}
+	}
+
+	switch {
+	case vm.State != client.Running:
+		_ = r.vmm.PowerOn(ctx, machine.ID)
+	}
 
 	return nil
+}
+
+func (r *MachineReconciler) reconcileImage(
+	ctx context.Context,
+	log logr.Logger,
+	machine *api.Machine,
+) (bool, error) {
+	image := ptr.Deref(machine.Spec.Image, "")
+	if image == "" {
+		log.V(2).Info("No image in machine set, skip fetch")
+		return false, nil
+	}
+
+	img, err := r.imageCache.Get(ctx, image)
+	if err != nil {
+		if errors.Is(err, ociImage.ErrImagePulling) {
+			log.V(1).Info("Image not in cache", "image", image)
+			return true, nil
+		}
+
+		return false, fmt.Errorf("failed to get image from cache: %w", err)
+	}
+
+	log.V(1).Info("Image in cache", "image", image)
+	rootFSFile := r.paths.MachineRootFSFile(machine.ID)
+	ok, err := osutils.RegularFileExists(rootFSFile)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		if err := r.raw.Create(rootFSFile, raw.WithSourceFile(img.RootFS.Path)); err != nil {
+			return false, fmt.Errorf("error creating root fs disk: %w", err)
+		}
+		//if err := os.Chmod(rootFSFile, 0666); err != nil {
+		//	return false, fmt.Errorf("error changing root fs disk mode: %w", err)
+		//}
+	}
+
+	return false, nil
 }
