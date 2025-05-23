@@ -16,6 +16,7 @@ import (
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/controllers"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/host"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/oci"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/networkinterface/options"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume/ceph"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/raw"
@@ -54,6 +55,8 @@ type Options struct {
 
 	CloudHypervisorBinPath      string
 	CloudHypervisorFirmwarePath string
+
+	NicPlugin *options.Options
 }
 
 func (o *Options) AddFlags(fs *pflag.FlagSet) {
@@ -87,6 +90,8 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 		"Detach VMs processes from manager process.",
 	)
 
+	o.NicPlugin = options.NewDefaultOptions()
+	o.NicPlugin.AddFlags(fs)
 }
 
 func Command() *cobra.Command {
@@ -153,7 +158,7 @@ func Run(ctx context.Context, opts Options) error {
 	pluginManager := volume.NewPluginManager()
 	if err := pluginManager.InitPlugins(hostPaths, []volume.Plugin{
 		ceph.NewPlugin(ceph.DefaultProvider(
-			log,
+			log.WithName("ceph-volume-plugin"),
 			hostPaths,
 			//TODO flag
 			"/usr/bin/qemu-storage-daemon",
@@ -161,6 +166,20 @@ func Run(ctx context.Context, opts Options) error {
 		)),
 	}); err != nil {
 		setupLog.Error(err, "failed to initialize plugins")
+		return err
+	}
+
+	nicPlugin, nicPluginCleanup, err := opts.NicPlugin.NetworkInterfacePlugin()
+	if err != nil {
+		setupLog.Error(err, "failed to initialize network plugin")
+		return err
+	}
+	if nicPluginCleanup != nil {
+		defer nicPluginCleanup()
+	}
+
+	if err := nicPlugin.Init(hostPaths); err != nil {
+		setupLog.Error(err, "failed to initialize network plugin")
 		return err
 	}
 
@@ -184,6 +203,26 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	nicStore, err := hostutils.NewStore[*api.NetworkInterface](hostutils.Options[*api.NetworkInterface]{
+		Dir:            hostPaths.NICStoreDir(),
+		NewFunc:        func() *api.NetworkInterface { return &api.NetworkInterface{} },
+		CreateStrategy: strategy.NetworkInterfaceStrategy,
+	})
+	if err != nil {
+		setupLog.Error(err, "failed to initialize nic store")
+		return err
+	}
+
+	nicEvents, err := event.NewListWatchSource[*api.NetworkInterface](
+		nicStore.List,
+		nicStore.Watch,
+		event.ListWatchSourceOptions{},
+	)
+	if err != nil {
+		setupLog.Error(err, "failed to initialize nic events")
+		return err
+	}
+
 	eventRecorder := recorder.NewEventStore(log, recorder.EventStoreOptions{})
 
 	virtualMachineManager := vmm.NewManager(hostPaths, vmm.ManagerOptions{
@@ -200,6 +239,9 @@ func Run(ctx context.Context, opts Options) error {
 		eventRecorder,
 		virtualMachineManager,
 		pluginManager,
+		nicStore,
+		nicEvents,
+		nicPlugin,
 		controllers.MachineReconcilerOptions{
 			ImageCache: imgCache,
 			Raw:        rawInst,
@@ -208,6 +250,21 @@ func Run(ctx context.Context, opts Options) error {
 	)
 	if err != nil {
 		setupLog.Error(err, "failed to initialize machine controller")
+		return err
+	}
+
+	nicReconciler, err := controllers.NewNetworkInterfaceReconciler(
+		log.WithName("nic-reconciler"),
+		eventRecorder,
+		nicStore,
+		nicEvents,
+		nicPlugin,
+		controllers.NetworkInterfaceReconcilerOptions{
+			Paths: hostPaths,
+		},
+	)
+	if err != nil {
+		setupLog.Error(err, "failed to initialize nic controller")
 		return err
 	}
 
@@ -241,6 +298,24 @@ func Run(ctx context.Context, opts Options) error {
 		setupLog.Info("Starting machine events")
 		if err := machineEvents.Start(ctx); err != nil {
 			setupLog.Error(err, "failed to start machine events")
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		setupLog.Info("Starting nic reconciler")
+		if err := nicReconciler.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start nic reconciler")
+			return err
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		setupLog.Info("Starting nic events")
+		if err := nicEvents.Start(ctx); err != nil {
+			setupLog.Error(err, "failed to start nic events")
 			return err
 		}
 		return nil
