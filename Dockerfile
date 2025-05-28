@@ -63,7 +63,11 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     ./cmd/prepare-host
 
 
-FROM gcr.io/distroless/static:nonroot AS prepare-host
+FROM alpine:3.21 AS prepare-host
+RUN apk add --no-cache ca-certificates
+
 WORKDIR /
 COPY --from=prepare-host-builder /workspace/bin/prepare-host .
 USER 65532:65532
+
+ENTRYPOINT ["/prepare-host"]
