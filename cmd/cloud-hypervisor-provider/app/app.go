@@ -15,6 +15,7 @@ import (
 	"github.com/ironcore-dev/cloud-hypervisor-provider/api"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/controllers"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/host"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/mcr"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/oci"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/networkinterface/options"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume"
@@ -132,6 +133,17 @@ func Command() *cobra.Command {
 func Run(ctx context.Context, opts Options) error {
 	log := ctrl.LoggerFrom(ctx)
 	setupLog := log.WithName("setup")
+
+	var classes []mcr.MachineClass
+	for _, class := range opts.MachineClasses {
+		classes = append(classes, mcr.MachineClass(class))
+	}
+
+	classRegistry, err := mcr.NewMachineClassRegistry(classes)
+	if err != nil {
+		setupLog.Error(err, "failed to initialize provider host")
+		return err
+	}
 
 	hostPaths, err := host.PathsAt(opts.RootDir)
 	if err != nil {
@@ -277,8 +289,8 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	srv, err := server.New(machineStore, server.Options{
-		EventStore:              eventRecorder,
-		SupportedMachineClasses: opts.MachineClasses,
+		EventStore:           eventRecorder,
+		MachineClassRegistry: classRegistry,
 	})
 	if err != nil {
 		return fmt.Errorf("error creating server: %w", err)

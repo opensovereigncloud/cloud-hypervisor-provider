@@ -6,16 +6,13 @@ package server
 import (
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/go-logr/logr"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/api"
 	iri "github.com/ironcore-dev/ironcore/iri/apis/machine/v1alpha1"
 	apiutils "github.com/ironcore-dev/provider-utils/apiutils/api"
 )
-
-func calcResources() (int64, int64) {
-	return 4, 1024
-}
 
 func (s *Server) createMachineFromIRIMachine(
 	ctx context.Context,
@@ -33,7 +30,10 @@ func (s *Server) createMachineFromIRIMachine(
 		return nil, fmt.Errorf("iri machine metadata is nil")
 	}
 
-	cpu, memory := calcResources()
+	class, found := s.machineClassRegistry.Get(iriMachine.Spec.Class)
+	if !found {
+		return nil, fmt.Errorf("machine class %s not supported", class.Name)
+	}
 
 	power, err := s.getPowerStateFromIRI(iriMachine.Spec.Power)
 	if err != nil {
@@ -67,8 +67,8 @@ func (s *Server) createMachineFromIRIMachine(
 		},
 		Spec: api.MachineSpec{
 			Power:             power,
-			CpuMillis:         cpu,
-			MemoryBytes:       memory,
+			Cpu:               int64(math.Max(float64(class.CpuMillis/1000), 1)),
+			MemoryBytes:       class.MemoryBytes,
 			Volumes:           volumes,
 			Ignition:          iriMachine.Spec.IgnitionData,
 			NetworkInterfaces: networkInterfaces,

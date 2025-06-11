@@ -5,10 +5,12 @@ package server
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/api"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/mcr"
 	"github.com/ironcore-dev/ironcore/broker/common/idgen"
 	iri "github.com/ironcore-dev/ironcore/iri/apis/machine/v1alpha1"
 	"github.com/ironcore-dev/provider-utils/eventutils/recorder"
@@ -22,7 +24,7 @@ var _ iri.MachineRuntimeServer = (*Server)(nil)
 type Server struct {
 	idGen idgen.IDGen
 
-	supportedMachineClasses []MachineClass
+	machineClassRegistry mcr.MachineClassRegistry
 
 	machineStore store.Store[*api.Machine]
 	eventStore   recorder.EventStore
@@ -33,7 +35,7 @@ type Options struct {
 
 	EventStore recorder.EventStore
 
-	SupportedMachineClasses []MachineClass
+	MachineClassRegistry mcr.MachineClassRegistry
 }
 
 type nilEventStore struct{}
@@ -54,11 +56,15 @@ func setOptionsDefaults(o *Options) {
 func New(store store.Store[*api.Machine], opts Options) (*Server, error) {
 	setOptionsDefaults(&opts)
 
+	if opts.MachineClassRegistry == nil {
+		return nil, fmt.Errorf("MachineClassRegistry option is required")
+	}
+
 	return &Server{
-		idGen:                   opts.IDGen,
-		machineStore:            store,
-		eventStore:              opts.EventStore,
-		supportedMachineClasses: opts.SupportedMachineClasses,
+		idGen:                opts.IDGen,
+		machineStore:         store,
+		eventStore:           opts.EventStore,
+		machineClassRegistry: opts.MachineClassRegistry,
 	}, nil
 }
 
