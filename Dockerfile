@@ -47,8 +47,11 @@ WORKDIR /
 
 RUN apt-get update && apt-get install -y  \
     ca-certificates  \
-    qemu-utils \
+    qemu-system-common \
+    qemu-block-extra \
     ceph-common \
+    librados2 \
+    librbd1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binaries from the builder

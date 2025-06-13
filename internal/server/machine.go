@@ -170,11 +170,11 @@ func (s *Server) getIRIMachineStatus(machine *api.Machine) (*iri.MachineStatus, 
 	}, nil
 }
 
-func (s *Server) getIRINICState(state api.NetworkInterfaceState) (iri.NetworkInterfaceState, error) {
+func (s *Server) getIRINICState(state api.MachineNetworkInterfaceState) (iri.NetworkInterfaceState, error) {
 	switch state {
-	case api.NetworkInterfaceStateAttached:
+	case api.MachineNetworkInterfaceStateAttached:
 		return iri.NetworkInterfaceState_NETWORK_INTERFACE_ATTACHED, nil
-	case api.NetworkInterfaceStatePending:
+	case api.MachineNetworkInterfaceStatePending:
 		return iri.NetworkInterfaceState_NETWORK_INTERFACE_PENDING, nil
 	default:
 		return 0, fmt.Errorf("unknown network interface state '%q'", state)
@@ -188,7 +188,9 @@ func (s *Server) getIRIVolumeState(state api.VolumeState) (iri.VolumeState, erro
 	case api.VolumeStatePending:
 		return iri.VolumeState_VOLUME_PENDING, nil
 	default:
-		return 0, fmt.Errorf("unknown volume state '%q'", state)
+		return iri.VolumeState_VOLUME_PENDING, nil
+		// TODO
+		//return 0, fmt.Errorf("unknown volume state '%q'", state)
 	}
 }
 
