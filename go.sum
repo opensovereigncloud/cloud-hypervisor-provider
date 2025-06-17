@@ -146,6 +146,8 @@ github.com/ironcore-dev/ironcore-net v0.2.3 h1:xn8+oFr7aQSmnMYymUoU/SCVTF7eeVPKQ
 github.com/ironcore-dev/ironcore-net v0.2.3/go.mod h1:1aj8WV/4HcBjYApvhHPgEjAY16Vpzvj8MMChhx2v0Zs=
 github.com/ironcore-dev/provider-utils v0.0.0-20250603083958-8628d8f587bc h1:F03t3hZXmi21V6kjIRRqe+CQcZ3sSRJkX9YQqa04wng=
 github.com/ironcore-dev/provider-utils v0.0.0-20250603083958-8628d8f587bc/go.mod h1:eRrTKf37eqHL4ucflPSbskwI/OcgcouYew/byJnIycw=
+github.com/ironcore-dev/provider-utils v0.0.0-20250617134512-c47138779fed h1:33OI50C0uNUyQf6yaUAMFfdVqUZcwspdZbPPG1l8noc=
+github.com/ironcore-dev/provider-utils v0.0.0-20250617134512-c47138779fed/go.mod h1:eRrTKf37eqHL4ucflPSbskwI/OcgcouYew/byJnIycw=
 github.com/josharian/intern v1.0.0 h1:vlS4z54oSdjm0bgjRigI+G1HpF+tI+9rE5LLzOg8HmY=
 github.com/josharian/intern v1.0.0/go.mod h1:5DoeVV0s6jJacbCEi61lwdGj/aVlrQvzHFFd8Hwg//Y=
 github.com/json-iterator/go v1.1.6/go.mod h1:+SdeFBvtyEkXs7REEP0seUULqWtbJapLOCVDaaPEHmU=
