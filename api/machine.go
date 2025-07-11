@@ -17,6 +17,8 @@ type Machine struct {
 }
 
 type MachineSpec struct {
+	ApiSocketPath *string `json:"api"`
+
 	Power PowerState `json:"power"`
 
 	Cpu         int64 `json:"cpuMillis"`
@@ -60,6 +62,7 @@ type VolumeSpec struct {
 	Device     string            `json:"device"`
 	EmptyDisk  *EmptyDiskSpec    `json:"emptyDisk,omitempty"`
 	Connection *VolumeConnection `json:"cephDisk,omitempty"`
+	DeletedAt  *time.Time        `json:"deletedAt,omitempty"`
 }
 
 type VolumeStatus struct {
@@ -87,6 +90,7 @@ type VolumeState string
 
 const (
 	VolumeStatePending  VolumeState = "Pending"
+	VolumeStatePrepared VolumeState = "Prepared"
 	VolumeStateAttached VolumeState = "Attached"
 )
 

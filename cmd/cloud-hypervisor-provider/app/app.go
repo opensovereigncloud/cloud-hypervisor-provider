@@ -20,6 +20,7 @@ import (
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/networkinterface/options"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume/ceph"
+	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/plugins/volume/emptydisk"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/raw"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/server"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/strategy"
@@ -36,6 +37,7 @@ import (
 	"github.com/spf13/pflag"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -51,13 +53,16 @@ func init() {
 type Options struct {
 	Address string
 
-	RootDir   string
-	DetachVms bool
+	RootDir         string
+	MachineStoreDir string
+	NICStoreDir     string
 
 	MachineClasses MachineClassOptions
 
-	CloudHypervisorBinPath      string
+	CloudHypervisorSocketsPath  string
 	CloudHypervisorFirmwarePath string
+
+	QMPSocketPath string
 
 	NicPlugin *options.Options
 }
@@ -73,10 +78,32 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	)
 
 	fs.StringVar(
-		&o.CloudHypervisorBinPath,
-		"cloud-hypervisor-bin-path",
+		&o.MachineStoreDir,
+		"provider-machine-store-dir",
+		filepath.Join(homeDir, ".cloud-hypervisor-provider/store/machine"),
+		"Path to the directory of the machine store.",
+	)
+
+	// TODO remove
+	fs.StringVar(
+		&o.NICStoreDir,
+		"provider-nic-store-dir",
+		filepath.Join(homeDir, ".cloud-hypervisor-provider/store/nics"),
+		"Path to the directory of the nics store.",
+	)
+
+	fs.StringVar(
+		&o.QMPSocketPath,
+		"qmp-socket-path",
+		filepath.Join(homeDir, ".cloud-hypervisor-provider/qmp.sock"),
+		"Path to the qmp socket.",
+	)
+
+	fs.StringVar(
+		&o.CloudHypervisorSocketsPath,
+		"cloud-hypervisor-sockets-path",
 		"",
-		"Path to the cloud-hypervisor binary.",
+		"Path to the cloud-hypervisor management sockets.",
 	)
 
 	fs.StringVar(
@@ -84,13 +111,6 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 		"cloud-hypervisor-firmware-path",
 		"",
 		"Path to the cloud-hypervisor firmware.",
-	)
-
-	fs.BoolVar(
-		&o.DetachVms,
-		"detach-vms",
-		true,
-		"Detach VMs processes from manager process.",
 	)
 
 	fs.Var(
@@ -175,15 +195,21 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	qmpProvider, err := ceph.QMPProvider(
+		ctx,
+		log.WithName("ceph-volume-plugin"),
+		hostPaths,
+		opts.QMPSocketPath,
+	)
+	if err != nil {
+		setupLog.Error(err, "failed to initialize qmp provider")
+		return err
+	}
+
 	pluginManager := volume.NewPluginManager()
 	if err := pluginManager.InitPlugins(hostPaths, []volume.Plugin{
-		ceph.NewPlugin(ceph.DefaultProvider(
-			log.WithName("ceph-volume-plugin"),
-			hostPaths,
-			//TODO flag
-			"/usr/bin/qemu-storage-daemon",
-			false,
-		)),
+		ceph.NewPlugin(qmpProvider),
+		emptydisk.NewPlugin(rawInst),
 	}); err != nil {
 		setupLog.Error(err, "failed to initialize plugins")
 		return err
@@ -204,7 +230,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	machineStore, err := hostutils.NewStore[*api.Machine](hostutils.Options[*api.Machine]{
-		Dir:            hostPaths.MachineStoreDir(),
+		Dir:            opts.MachineStoreDir,
 		NewFunc:        func() *api.Machine { return &api.Machine{} },
 		CreateStrategy: strategy.MachineStrategy,
 	})
@@ -224,7 +250,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	nicStore, err := hostutils.NewStore[*api.NetworkInterface](hostutils.Options[*api.NetworkInterface]{
-		Dir:            hostPaths.NICStoreDir(),
+		Dir:            opts.NICStoreDir,
 		NewFunc:        func() *api.NetworkInterface { return &api.NetworkInterface{} },
 		CreateStrategy: strategy.NetworkInterfaceStrategy,
 	})
@@ -243,15 +269,33 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	var socketsInUse []string
+	machines, err := machineStore.List(ctx)
+	if err != nil {
+		setupLog.Error(err, "failed to get initial machines")
+		return err
+	}
+	for _, machine := range machines {
+		if sock := ptr.Deref(machine.Spec.ApiSocketPath, ""); sock != "" {
+			socketsInUse = append(socketsInUse, sock)
+		}
+	}
+
+	virtualMachineManager, err := vmm.NewManager(
+		log.WithName("virtual-machine-manager"),
+		hostPaths,
+		vmm.ManagerOptions{
+			CHSocketsPath:     opts.CloudHypervisorSocketsPath,
+			FirmwarePath:      opts.CloudHypervisorFirmwarePath,
+			ReservedInstances: socketsInUse,
+		},
+	)
+	if err != nil {
+		setupLog.Error(err, "failed to initialize virtual-machine-manager")
+		return err
+	}
+
 	eventRecorder := recorder.NewEventStore(log, recorder.EventStoreOptions{})
-
-	virtualMachineManager := vmm.NewManager(hostPaths, vmm.ManagerOptions{
-		CloudHypervisorBin: opts.CloudHypervisorBinPath,
-		Logger:             log.WithName("virtual-machine-manager"),
-		DetachVms:          opts.DetachVms,
-		FirmwarePath:       opts.CloudHypervisorFirmwarePath,
-	})
-
 	machineReconciler, err := controllers.NewMachineReconciler(
 		log.WithName("machine-reconciler"),
 		machineStore,
