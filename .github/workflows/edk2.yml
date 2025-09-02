@@ -9,10 +9,10 @@ on:
       edk2_release:
         type: string
         default: "edk2-stable2025XX"  
-jobs:
-  permissions:
+permissions:
     contents: read
     packages: write
+jobs:
   build:
     runs-on: ubuntu-latest
     defaults:
