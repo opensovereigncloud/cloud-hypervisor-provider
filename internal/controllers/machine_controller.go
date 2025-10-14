@@ -246,8 +246,10 @@ func (r *MachineReconciler) deleteMachine(ctx context.Context, log logr.Logger, 
 	}
 
 	log.V(1).Info("Delete machine")
-	if err := r.vmm.Delete(ctx, apiSocket); !errors.Is(err, vmm.ErrNotFound) {
-		return fmt.Errorf("failed to kill VMM: %w", err)
+	if err := r.vmm.Delete(ctx, apiSocket); err != nil {
+		if !errors.Is(err, vmm.ErrNotFound) {
+			return fmt.Errorf("failed to delete machine: %w", err)
+		}
 	}
 
 	log.V(1).Info("Delete volumes")
