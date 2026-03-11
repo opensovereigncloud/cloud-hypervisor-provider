@@ -1,0 +1,78 @@
+name: Run integration tests
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+    paths-ignore:
+      - 'docs/**'
+
+jobs:
+  integration-tests:
+    runs-on: ubuntu-24.04
+
+    if: contains(github.event.pull_request.labels.*.name, 'integration-tests')
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install dependencies
+        run: |
+          set -x
+
+          if [ ! -e /dev/kvm ]; then
+            echo "KVM not available"
+            exit 1
+          fi
+
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+          ca-certificates libc-bin gcc cpu-checker
+          sudo update-ca-certificates
+          sudo rm -rf /var/lib/apt/lists
+
+          sudo curl -L "https://github.com/cloud-hypervisor/cloud-hypervisor/releases/download/v51.1/cloud-hypervisor-static" -o "/usr/local/bin/cloud-hypervisor"
+          sudo curl -L "https://github.com/cloud-hypervisor/rust-hypervisor-firmware/releases/download/0.5.0/hypervisor-fw" -o "/usr/local/bin/hypervisor-fw"
+
+          sudo chmod a+x /usr/local/bin/cloud-hypervisor
+
+          # Create chp group and user
+          if ! getent group chp > /dev/null 2>&1; then
+            sudo groupadd -g 65532 chp
+          fi
+          if ! getent passwd chp > /dev/null 2>&1; then
+            sudo useradd -u 65532 -g chp -s /sbin/nologin -M -d /nonexistent chp
+          fi
+
+          sudo usermod -aG kvm chp
+
+          # Create storage directory
+          sudo mkdir -p /var/lib/chp
+          sudo mkdir -p /run/chp/ch
+          sudo chown chp:chp /var/lib/chp
+          sudo chmod 0755 /var/lib/chp
+          sudo chown chp:chp /run/chp/ch
+          sudo chmod 0755 /run/chp/ch
+          echo "CH_SOCKET_DIR=/run/chp/ch/" >> $GITHUB_ENV
+
+          sudo -u chp /usr/local/bin/cloud-hypervisor --api-socket /run/chp/ch/01.sock -v &
+          sudo -u chp /usr/local/bin/cloud-hypervisor --api-socket /run/chp/ch/02.sock -v &
+
+          sleep 2
+
+          # Make sockets accessible to runner
+          sudo chmod o+rw /run/chp/ch/*.sock
+
+          sudo ls -la /run/chp/ch
+
+
+      - name: Run integration tests
+        run: |
+          sudo kvm-ok
+          sudo /usr/local/bin/cloud-hypervisor --version
+          make integration-tests

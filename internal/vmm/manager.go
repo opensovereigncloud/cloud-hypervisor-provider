@@ -56,9 +56,14 @@ func NewManager(log logr.Logger, paths host.Paths, opts ManagerOptions) (*Manage
 
 		socketPath := filepath.Join(opts.CHSocketsPath, v.Name())
 
-		apiClient, err := newUnixSocketClient(socketPath)
+		apiClient, err := NewUnixSocketClient(socketPath)
 		if err != nil {
 			initLog.V(1).Info("Failed to init cloud-hypervisor client", "path", socketPath)
+			continue
+		}
+
+		if _, err := apiClient.GetVmmPing(context.TODO()); err != nil {
+			initLog.V(1).Info("Failed to ping cloud-hypervisor socket", "path", socketPath)
 			continue
 		}
 
@@ -75,6 +80,9 @@ func NewManager(log logr.Logger, paths host.Paths, opts ManagerOptions) (*Manage
 	}
 
 	initLog.V(1).Info("Successfully initialized clients", "num", len(m.instances))
+	if len(m.instances) == 0 {
+		return nil, errors.New("no instances found")
+	}
 
 	return m, nil
 }
@@ -93,13 +101,8 @@ type Manager struct {
 }
 
 var (
-	ErrNotFound                 = errors.New("not found")
-	ErrAlreadyExists            = errors.New("already exists")
-	ErrResourceVersionNotLatest = errors.New("resourceVersion is not latest")
-	ErrVmInitialized            = errors.New("vm already initialized")
-
 	ErrBrokenSocket = errors.New("broken socket")
-
+	ErrNotFound     = errors.New("not found")
 	ErrVmNotCreated = errors.New("vm is not created")
 )
 
