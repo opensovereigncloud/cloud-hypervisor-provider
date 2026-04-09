@@ -1,5 +1,11 @@
 # Build the manager binary
-FROM --platform=$BUILDPLATFORM golang:1.24.1 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26.2-bookworm AS builder
+
+# Set explicitly — the golang image defaults to this today, but we pin it
+# so the policy is visible and survives upstream default changes.
+# The Docker image IS the toolchain: fail loudly, never download silently.
+ENV GOTOOLCHAIN=local
+
 ARG TARGETOS
 ARG TARGETARCH
 ARG BUILDPLATFORM
