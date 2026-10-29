@@ -9,9 +9,7 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
 
-	"github.com/digitalocean/go-qemu/qmp"
 	"github.com/go-logr/logr"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/api"
 	"github.com/ironcore-dev/cloud-hypervisor-provider/internal/host"
@@ -44,47 +42,24 @@ type validatedVolume struct {
 	encryptionKey *string
 }
 
-type Provider interface {
+type backend interface {
+	VolumeType() api.VolumeType
 	Mount(ctx context.Context, machineID string, volume *validatedVolume) (string, error)
-	Unmount(ctx context.Context, machineID string, volumeID string) error
+	Unmount(ctx context.Context, machineID string, volume *validatedVolume) error
 }
 
-func QMPProvider(ctx context.Context, log logr.Logger, paths host.Paths, socket string) (Provider, error) {
-	monitor, err := qmp.NewSocketMonitor("unix", socket, 2*time.Second)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to qmp monitor: %w", err)
-	}
-
-	go func() {
-		// TODO
-		_ = monitor.Connect()
-		defer func() {
-			// TODO
-			_ = monitor.Disconnect()
-		}()
-
-		stream, _ := monitor.Events(ctx)
-		for e := range stream {
-			log.V(1).Info(fmt.Sprintf("EVENT: %s", e.Event))
-		}
-	}()
-
-	return &QMP{
-		log:     log,
-		paths:   paths,
-		monitor: monitor,
-	}, nil
+// NewRBDPlugin creates a volume.Plugin backed by host-level rbd map/unmap.
+func NewRBDPlugin(log logr.Logger, paths host.Paths) volume.Plugin {
+	return newPlugin(newRBDProvider(log, paths))
 }
 
 type plugin struct {
-	provider Provider
-	host     volume.Host
+	be   backend
+	host volume.Host
 }
 
-func NewPlugin(provider Provider) volume.Plugin {
-	return &plugin{
-		provider: provider,
-	}
+func newPlugin(be backend) volume.Plugin {
+	return &plugin{be: be}
 }
 
 func (p *plugin) Init(host volume.Host) error {
@@ -181,14 +156,14 @@ func (p *plugin) Apply(ctx context.Context, spec *api.VolumeSpec, machineID stri
 		return nil, fmt.Errorf("failed to get volume data: %w", err)
 	}
 
-	path, err := p.provider.Mount(ctx, machineID, volumeData)
+	path, err := p.be.Mount(ctx, machineID, volumeData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to mount volume: %w", err)
 	}
 
 	return &api.VolumeStatus{
 		Name:   spec.Name,
-		Type:   api.VolumeSocketType,
+		Type:   p.be.VolumeType(),
 		Path:   path,
 		Handle: volumeData.handle,
 		State:  api.VolumeStatePrepared,
@@ -237,10 +212,43 @@ func (p *plugin) validateVolume(spec *api.VolumeSpec) (vData *validatedVolume, e
 	return vData, nil
 }
 
-func (p *plugin) Delete(ctx context.Context, computeVolumeName string, machineID string) error {
-	if err := p.provider.Unmount(ctx, machineID, computeVolumeName); err != nil {
-		return fmt.Errorf("failed to unmount volume %q: %w", computeVolumeName, err)
+func (p *plugin) Delete(ctx context.Context, spec *api.VolumeSpec, machineID string) error {
+	volume, err := p.volumeForUnmount(spec)
+	if err != nil {
+		return fmt.Errorf("failed to get volume data for deletion: %w", err)
 	}
 
-	return os.RemoveAll(p.host.MachineVolumeDir(machineID, cephDriverName, computeVolumeName))
+	if err := p.be.Unmount(ctx, machineID, volume); err != nil {
+		return fmt.Errorf("failed to unmount volume %q: %w", spec.Name, err)
+	}
+
+	return os.RemoveAll(p.host.MachineVolumeDir(machineID, cephDriverName, spec.Name))
+}
+
+func (p *plugin) volumeForUnmount(spec *api.VolumeSpec) (*validatedVolume, error) {
+	if spec == nil {
+		return nil, fmt.Errorf("volume is nil")
+	}
+	connection := spec.Connection
+	if connection == nil {
+		return nil, fmt.Errorf("volume does not specify connection")
+	}
+	if connection.Driver != cephDriverName {
+		return nil, fmt.Errorf("volume connection specifies invalid driver %q", connection.Driver)
+	}
+	if connection.Attributes == nil {
+		return nil, fmt.Errorf("volume connection does not specify attributes")
+	}
+	if connection.Handle == "" {
+		return nil, fmt.Errorf("volume connection does not specify handle")
+	}
+
+	volume := &validatedVolume{
+		name:   spec.Name,
+		handle: connection.Handle,
+	}
+	if err := readVolumeAttributes(connection.Attributes, volume); err != nil {
+		return nil, fmt.Errorf("error reading volume attributes: %w", err)
+	}
+	return volume, nil
 }

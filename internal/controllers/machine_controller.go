@@ -240,7 +240,7 @@ func (r *MachineReconciler) deleteMachine(ctx context.Context, log logr.Logger, 
 		}
 
 		log.V(2).Info("Delete volume", "name", vol.Name, "plugin", plugin.Name())
-		if err := plugin.Delete(ctx, vol.Name, machine.ID); err != nil {
+		if err := plugin.Delete(ctx, vol, machine.ID); err != nil {
 			return fmt.Errorf("failed to delete volume %s: %w", vol.Name, err)
 		}
 	}
@@ -285,7 +285,7 @@ func (r *MachineReconciler) reconcileVolumes(ctx context.Context, log logr.Logge
 		if vol.DeletedAt != nil {
 			if status.State != api.VolumeStateAttached {
 				log.V(2).Info("Delete not attached volume", "name", vol.Name)
-				if err := plugin.Delete(ctx, vol.Name, machine.ID); err != nil {
+				if err := plugin.Delete(ctx, vol, machine.ID); err != nil {
 					return fmt.Errorf("failed to delete volume %s: %w", vol.Name, err)
 				}
 				continue
@@ -393,7 +393,14 @@ func (r *MachineReconciler) attachDetachDisks(
 				}
 				log.V(1).Info("Removed disk", "disk", vol.Name)
 
-				updatedVolumeStatus = append(updatedVolumeStatus, status)
+				plugin, err := r.VolumePluginManager.FindPluginBySpec(vol)
+				if err != nil {
+					return fmt.Errorf("failed to find plugin for volume %s: %w", vol.Name, err)
+				}
+				if err := plugin.Delete(ctx, vol, machine.ID); err != nil {
+					return fmt.Errorf("failed to cleanup volume %s: %w", vol.Name, err)
+				}
+				log.V(1).Info("Cleaned up volume", "disk", vol.Name)
 				continue
 			}
 
